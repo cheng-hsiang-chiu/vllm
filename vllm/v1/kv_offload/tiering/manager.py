@@ -339,6 +339,12 @@ class TieringOffloadingManager(OffloadingManager):
         # (otherwise a disk or P2P hit would be mislabeled as a host hit).
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
+        # Request IDs whose secondary->primary promotion completed since the
+        # last scheduler step, plus read-pins protecting their promoted CPU
+        # chunks until prepare_load() or request completion.
+        self._newly_promoted_req_ids: set[str] = set()
+        self._promoted_pins: dict[str, tuple[list[OffloadKey], ReqContext]] = {}
+
         # Cached ParentManager wrappers for each secondary tier.
         self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
             tier: _SecondaryTierFacingParent(self, tier_idx)
@@ -570,6 +576,28 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
+            req_id = transfer_job.req_context.req_id
+            state = self._req_state.get(req_id)
+            if (
+                req_id in self._request_load_sources or state is not None
+            ) and not (state is not None and state.is_finished):
+                self._newly_promoted_req_ids.add(req_id)
+                ready_keys = [
+                    k
+                    for k in successful_keys
+                    if self.primary_tier.lookup(k, transfer_job.req_context)
+                    is LookupResult.HIT
+                ]
+                if ready_keys:
+                    self.primary_tier.prepare_read(ready_keys, transfer_job.req_context)
+                    pinned = self._promoted_pins.get(req_id)
+                    if pinned is None:
+                        self._promoted_pins[req_id] = (
+                            list(ready_keys),
+                            transfer_job.req_context,
+                        )
+                    else:
+                        pinned[0].extend(ready_keys)
         if not failed_keys:
             assert completed_job.deferred_release is None
         elif completed_job.deferred_release is not None:
@@ -871,6 +899,25 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._pending_load_submissions.clear()
 
+    def _release_promoted_pins(self, req_id: str) -> None:
+        """Release any promotion-completion read-pins held for ``req_id``."""
+        pinned = self._promoted_pins.pop(req_id, None)
+        if pinned is not None:
+            keys, req_context = pinned
+            self.primary_tier.complete_read(keys, req_context)
+
+    @override
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose secondary->primary promotion
+        completed since the last call.
+        """
+        self._maybe_process_finished_jobs()
+        if not self._newly_promoted_req_ids:
+            return set()
+        promoted = set(self._newly_promoted_req_ids)
+        self._newly_promoted_req_ids.clear()
+        return promoted
+
     @override
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -891,7 +938,9 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
 
         """
-        return self.primary_tier.prepare_load(keys, req_context)
+        spec = self.primary_tier.prepare_load(keys, req_context)
+        self._release_promoted_pins(req_context.req_id)
+        return spec
 
     @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -1094,6 +1143,7 @@ class TieringOffloadingManager(OffloadingManager):
         reporting completion via get_finished_jobs().
         """
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
+        self._release_promoted_pins(req_context.req_id)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
         job_metadata = TransferJob(
@@ -1144,6 +1194,8 @@ class TieringOffloadingManager(OffloadingManager):
         *,
         exclude_tier_idx: int | None = None,
     ) -> None:
+        self._release_promoted_pins(req_context.req_id)
+        self._newly_promoted_req_ids.discard(req_context.req_id)
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
@@ -1282,6 +1334,8 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._newly_promoted_req_ids.clear()
+        self._promoted_pins.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []

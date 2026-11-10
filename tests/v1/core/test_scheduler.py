@@ -6520,6 +6520,65 @@ def test_remote_kv_promotion_drains_before_grammar_prefix():
     ]
 
 
+def test_promoted_kv_request_readmitted_at_waiting_front():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+
+    req_still_pulling, req_older_miss, req_promoted = create_requests(
+        num_requests=3, req_ids=["req-pulling", "req-miss", "req-promoted"]
+    )
+    for req in (req_still_pulling, req_older_miss, req_promoted):
+        scheduler.add_request(req)
+
+    # Simulate that req_promoted finished its async secondary->primary promotion
+    # before this step, while req_still_pulling's lookup is still pending (None).
+    scheduler.connector.pop_newly_promoted_req_ids.return_value = {
+        req_promoted.request_id
+    }
+
+    def lookup_side_effect(request, num_computed_tokens):
+        if request.request_id == req_still_pulling.request_id:
+            return (None, False)
+        return (0, False)
+
+    scheduler.connector.get_num_new_matched_tokens.side_effect = lookup_side_effect
+
+    output = scheduler.schedule()
+
+    assert [r.req_id for r in output.scheduled_new_reqs] == [req_promoted.request_id]
+    assert req_promoted.priority == 0
+    assert [r.request_id for r in scheduler.waiting] == [
+        req_still_pulling.request_id,
+        req_older_miss.request_id,
+    ]
+
+
+def test_promoted_kv_request_stays_behind_preempted_head():
+    scheduler = create_scheduler(max_num_seqs=1)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+
+    req_preempted, req_older_miss, req_promoted = create_requests(
+        num_requests=3, req_ids=["req-preempted", "req-miss", "req-promoted"]
+    )
+    req_preempted.status = RequestStatus.PREEMPTED
+    for req in (req_preempted, req_older_miss, req_promoted):
+        scheduler.add_request(req)
+
+    scheduler.connector.pop_newly_promoted_req_ids.return_value = {
+        req_promoted.request_id
+    }
+
+    output = scheduler.schedule()
+
+    assert req_preempted.request_id in output.num_scheduled_tokens
+    assert [r.request_id for r in scheduler.running] == [req_preempted.request_id]
+    assert [r.request_id for r in scheduler.waiting] == [
+        req_promoted.request_id,
+        req_older_miss.request_id,
+    ]
+
+
 def test_fcfs_mixed_blocked_types_remote_load_drains_first():
     scheduler = create_scheduler(max_num_batched_tokens=20)
     scheduler._update_waiting_for_remote_kv = Mock()

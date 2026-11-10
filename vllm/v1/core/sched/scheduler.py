@@ -1024,6 +1024,32 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             if self.cache_aware_window and not defer_prefills:
                 self._reorder_waiting_by_cached_prefix()
+            if self.connector is not None:
+                promoted_req_ids = self.connector.pop_newly_promoted_req_ids()
+                if promoted_req_ids and isinstance(
+                    promoted_req_ids, (set, list, tuple)
+                ):
+                    for queue in (self.waiting, self.async_kv_waiting):
+                        promoted_reqs = [
+                            req
+                            for req in queue
+                            if req.request_id in promoted_req_ids
+                            and req.status == RequestStatus.WAITING
+                        ]
+                        if promoted_reqs:
+                            preempted_head: list[Request] = []
+                            while (
+                                queue
+                                and queue.peek_request().status
+                                == RequestStatus.PREEMPTED
+                            ):
+                                preempted_head.append(queue.pop_request())
+                            queue.remove_requests(promoted_reqs)
+                            for req in reversed(promoted_reqs):
+                                queue.prepend_request(req)
+                                self.deferred_waiting.discard(req)
+                            for req in reversed(preempted_head):
+                                queue.prepend_request(req)
 
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()

@@ -1361,6 +1361,13 @@ class OffloadingConnectorScheduler:
             req_context, request, self.config.kv_group_configs
         )
 
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose async promotion into the
+        primary tier completed since the last call.
+        """
+        self._acquire_step()
+        return self.manager.pop_newly_promoted_req_ids()
+
     def get_num_new_matched_tokens(
         self,
         request: Request,

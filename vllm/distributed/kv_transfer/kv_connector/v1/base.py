@@ -647,6 +647,12 @@ class KVConnectorBase_V1(ABC):
         params = request.kv_transfer_params
         return bool(params and params.get("do_remote_prefill"))
 
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose async external KV promotion
+        completed since the last call and are ready for re-admission.
+        """
+        return set()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 

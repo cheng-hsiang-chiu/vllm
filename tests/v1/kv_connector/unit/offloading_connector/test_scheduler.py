@@ -7079,3 +7079,14 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         make_offload_key(request.block_hashes[boundary // 4 - 1], g) in offered
         for g in [0, 1]
     )
+
+
+@pytest.mark.cpu_test
+def test_offloading_connector_pop_newly_promoted_req_ids():
+    engine = _make_lookahead_hybrid_engine(1)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    connector.scheduler.manager.pop_newly_promoted_req_ids.return_value = {"req-p2p"}
+
+    assert connector.pop_newly_promoted_req_ids() == {"req-p2p"}
+    connector.scheduler.manager.pop_newly_promoted_req_ids.assert_called_once_with()

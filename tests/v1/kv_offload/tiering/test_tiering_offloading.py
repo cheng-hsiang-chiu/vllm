@@ -597,6 +597,86 @@ class TestTieringOffloadingManager:
             for chunk in chunks
         )
 
+    def test_promoted_chunks_pinned_until_prepare_load(self, manager_setup):
+        """Promoted chunks stay read-pinned against LRU eviction until
+        prepare_load() consumes them, and pop_newly_promoted_req_ids()
+        reports the promoted request once.
+        """
+        promoted_chunks = to_keys(range(4))
+        filler_chunks = to_keys(range(4, 10))
+        competing_chunks = to_keys(range(10, 14))
+
+        self._start_request()
+        for chunk in promoted_chunks:
+            self.secondary_tier1.chunks[chunk] = True
+            assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
+
+        # Before Step 1 end flushes submit_load(), nothing is promoted yet.
+        assert self.manager.pop_newly_promoted_req_ids() == set()
+
+        # Step 1 end: flushes deferred submit_load() calls.
+        self._simulate_on_schedule_end()
+
+        # Step 2 start: pop_newly_promoted_req_ids() polls finished jobs and
+        # returns the request ID once; promoted chunks have ref_cnt == 1.
+        assert self.manager.pop_newly_promoted_req_ids() == {_CTX.req_id}
+        assert self.manager.pop_newly_promoted_req_ids() == set()
+        for key in promoted_chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 1
+
+        # Fill the remaining 6 primary slots with another request's store.
+        other_ctx = ReqContext(req_id="other")
+        self.manager.on_new_request(other_ctx)
+        assert self.manager.prepare_store(filler_chunks, other_ctx) is not None
+        self.manager.complete_store(filler_chunks, other_ctx, success=True)
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # A competing store of 4 chunks must evict filler_chunks, NOT the
+        # read-pinned promoted_chunks.
+        assert self.manager.prepare_store(competing_chunks, other_ctx) is not None
+        self.manager.complete_store(competing_chunks, other_ctx, success=True)
+        assert count_hits(self.primary_tier, promoted_chunks) == 4
+
+        # Calling prepare_load() transfers the pin to the GPU load (ref_cnt == 1),
+        # and complete_load() drops ref_cnt to 0 so the chunks become evictable.
+        self.manager.prepare_load(promoted_chunks, _CTX)
+        for key in promoted_chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 1
+        self.manager.complete_load(promoted_chunks, _CTX)
+        for key in promoted_chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 0
+
+    def test_promoted_chunks_unpinned_on_request_finished(self, manager_setup):
+        """If a request finishes or aborts without calling prepare_load(),
+        on_request_finished() releases its promotion read-pins.
+        """
+        chunks = to_keys(range(3))
+        self._start_request()
+        for chunk in chunks:
+            self.secondary_tier1.chunks[chunk] = True
+            assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
+
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+        for key in chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 1
+
+        self.manager.on_request_finished(_CTX)
+        assert self.manager.pop_newly_promoted_req_ids() == set()
+        for key in chunks:
+            chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
+            assert chunk.ref_cnt == 0
+
     @pytest.mark.parametrize(
         "source",
         [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],

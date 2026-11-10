@@ -168,6 +168,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.pop_newly_promoted_req_ids()
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

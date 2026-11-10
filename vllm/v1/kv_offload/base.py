@@ -500,6 +500,12 @@ class OffloadingManager(ABC):
         """
         return False
 
+    def pop_newly_promoted_req_ids(self) -> set[str]:
+        """Return and clear request IDs whose async promotion into the
+        primary tier completed since the last call.
+        """
+        return set()
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return

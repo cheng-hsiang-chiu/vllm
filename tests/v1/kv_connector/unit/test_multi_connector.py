@@ -291,6 +291,15 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+def test_multi_connector_pop_newly_promoted_req_ids(mc: MultiConnector):
+    mc._connectors[0].pop_newly_promoted_req_ids.return_value = {"req-a"}
+    mc._connectors[1].pop_newly_promoted_req_ids.return_value = {"req-b", "req-c"}
+
+    assert mc.pop_newly_promoted_req_ids() == {"req-a", "req-b", "req-c"}
+    mc._connectors[0].pop_newly_promoted_req_ids.assert_called_once_with()
+    mc._connectors[1].pop_newly_promoted_req_ids.assert_called_once_with()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
